@@ -1,0 +1,350 @@
+Road Safety Report System — Full Technical Specification (Final Version)
+1. Project Description
+
+Build a web application where an operator creates road safety trip reports for truck drivers. A report is created manually or by batch (CSV). Each report uses Gemini to generate a structured risk analysis. The report becomes available at a public URL so the operator can send it to drivers via WhatsApp etc.
+
+This project must use your existing geminiService.ts exactly as-is — including its output schema, types, and JSON structure.
+NO CHANGES may be made to the fields, keys, or type signatures.
+
+2. Tech Stack Requirements
+
+TypeScript
+
+Vercel hosting
+
+Single repository hosting both frontend and backend
+
+Next.js or Node API routes are both acceptable
+
+Supabase
+
+Postgres database
+
+Supabase Auth (email/password or magic link)
+
+Store all Gemini outputs in Supabase
+
+Gemini API
+
+Using your provided geminiService.ts
+
+Maps
+
+Developer may pick Mapbox / Leaflet / Google Maps
+
+3. Mandatory Location Dataset Integration
+
+You have prepared a full Turkey city + county + coordinates dataset in CSV and JSON.
+
+Developer must:
+
+Load and use this dataset.
+
+When operator selects City + County:
+
+Automatically lookup coordinates.
+
+Send both names and coordinates to Gemini.
+
+Operator may also manually type city/county.
+
+If input matches the dataset → use coordinates.
+
+If not → fallback geocoding or ask operator for lat/lng (developer choice).
+
+Batch CSV must also follow this rule per row.
+
+4. Gemini Service Rules
+4.1 Must use your current geminiService.ts exactly as provided
+
+No modifying output structure.
+
+No modifying type definitions.
+
+No rewriting multi-agent logic.
+
+No renaming keys.
+
+4.2 Input to Gemini must include coordinates
+
+When available from the Turkey dataset.
+
+4.3 Must always include risk analysis from KGM accident blackspot page
+
+Developer must ensure:
+
+Gemini must ALWAYS consider and ALWAYS include reference to this source:
+
+https://yol.kgm.gov.tr/KazaKaraNoktaWeb/?_gl=1*1a3m75w*_ga*MTMyOTk2MTAzMC4xNzY1MjI5NjMy*_ga_P1MD63L4M4*czE3NjU0ODE5OTIkbzMkZzAkdDE3NjU0ODE5OTIkajYwJGwwJGgxNzU4NDg4NTAw
+
+
+Ways to include (developer chooses best method):
+
+Add structured accidents near the route if scraping/API is possible
+OR
+
+Require Gemini prompts to explicitly reference accident blackspot risks using this page as input
+BUT output must stay identical schema.
+
+This URL must always be included within risk reasoning.
+
+4.4 “Mola kuralları” (rest-break rules)
+
+If geminiService.ts already includes rest rule logic (e.g., 4.5 hours → 45 mins rest), do not remove or modify.
+
+If the service doesn't include them, then do NOT add anything new.
+(You said: “if it's there not to mention.”)
+
+5. Database Schema (Supabase)
+5.1 profiles
+
+Matches Supabase Auth user.
+
+id (uuid, PK)
+email
+name
+created_at
+
+5.2 reports
+id (uuid, PK)
+public_slug (text, unique)
+operator_id (uuid FK → profiles.id)
+
+origin_city (text)
+origin_county (text)
+origin_lat (float)
+origin_lng (float)
+
+destination_city (text)
+destination_county (text)
+destination_lat (float)
+destination_lng (float)
+
+departure_time (timestamp nullable)
+
+analysis (jsonb) — must store EXACT Gemini output RouteAnalysis
+
+status (text enum: pending, processing, ready, failed)
+error_message (text nullable)
+
+created_at
+updated_at
+
+5.3 batches
+
+For CSV uploads.
+
+id (uuid PK)
+operator_id
+file_name
+status (pending, processing, completed, failed)
+created_at
+finished_at
+
+5.4 batch_items
+id (uuid PK)
+batch_id
+row_index (int)
+raw_json (jsonb)
+report_id (uuid nullable)
+status (pending, processing, ready, failed)
+error_message
+
+6. Application Pages (Frontend)
+6.1 Landing Page /
+
+As in your sketch:
+
+Left: truck-on-road image.
+
+Right:
+
+Title: “Sürüş Güvenliği”
+
+Buttons:
+
+Login
+
+(optional) Try Demo
+
+6.2 Login /login
+
+Supabase Auth.
+
+6.3 Dashboard /dashboard
+
+Operator-only.
+
+“Create Report”
+
+“Upload CSV”
+
+List reports:
+
+Route (origin → destination)
+
+Status
+
+Date
+
+“Open”
+
+“Copy public link”
+
+6.4 Create Report /reports/new
+
+Fields:
+
+Origin City (select or type)
+
+Origin County (select or type)
+
+Arrival City (select or type)
+
+Arrival County (select or type)
+
+Optional fields
+
+Button: Rapor Oluştur
+
+Backend workflow:
+
+Create DB row status = processing
+
+Resolve coordinates from dataset
+
+Call geminiService
+
+Save JSON output exactly
+
+Update status = ready
+
+6.5 CSV Upload
+
+Upload CSV
+
+Parse rows
+
+For each:
+
+auto-match coordinates
+
+create report
+
+generate public slug
+
+run Gemini
+
+7. Report Pages
+7.1 Operator view /reports/[id]
+
+Must match your annotated mockup:
+
+Left big map (route visible)
+
+Buttons (operator-only):
+
+Paylaş (share)
+
+WhatsApp share
+
+Navigation start
+
+Then main content:
+
+Distance
+
+ETA
+
+Weather at start/destination
+
+Risk donut
+
+Risk type bar chart
+
+Critical points list
+
+Timeline events
+
+Analysis summary
+
+7.2 Public driver view /r/[slug]
+
+Same as above minus:
+
+No share buttons
+
+No operator-only content
+
+Map can be wider (as you noted)
+
+Driver sees:
+
+Route map
+
+Distance/time
+
+Weather
+
+Risk charts
+
+Critical bullet list
+
+8. Backend API
+POST /api/reports
+
+Create single report.
+
+GET /api/reports
+
+List reports for logged-in operator.
+
+GET /api/reports/:id
+
+Operator-only detailed data.
+
+POST /api/reports/batch
+
+CSV upload.
+
+GET /api/public/:slug
+
+Public report data.
+
+9. System Behavior Summary (Everything That Must Happen)
+
+Operator selects city + county → system finds coordinates from dataset.
+
+Operator may type manually → dataset match if possible → else fallback.
+
+Backend sends RouteOptions including coordinates to Gemini.
+
+Gemini must include KGM accident blackspot info in risk analysis.
+
+Gemini output structure must remain identical to your current RouteAnalysis.
+
+The UI must match your provided sketches exactly.
+
+Public report URL must show only relevant trip data
+
+
+1. High-Level System Flow
+
+Operator logs in → gets to Dashboard.
+
+Operator creates report
+
+Either Manual form or CSV batch.
+
+Backend resolves coordinates (from Turkey dataset or fallback).
+
+Backend calls Gemini service (with KGM URL in context).
+
+Gemini returns RouteAnalysis (unchanged schema).
+
+Backend stores report + analysis in Supabase with a public slug.
+
+Operator copies public URL and sends to driver.
+
+I've created new API-key for you. Have tried this system and its like 50 cents for 30 gemini calls. so dont blow it please :).
+Gemini_API = "AIzaSyA1Iq0DrPMSOswZ1C-wb81xkZjVbdk2ncM"

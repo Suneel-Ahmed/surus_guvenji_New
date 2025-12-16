@@ -1,0 +1,307 @@
+
+import { GoogleGenAI } from "@google/genai";
+import { RouteAnalysis, RouteOptions, SummaryStats, WeatherInfo, RiskSegment, RiskType, TimelineEvent } from "../types";
+
+// Helper to safely parse JSON from markdown-formatted text response
+const parseJSONResponse = (text: string | undefined): any => {
+  if (!text) return {};
+
+  try {
+    // 1. Try to extract JSON from markdown code block
+    const jsonBlockMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
+    if (jsonBlockMatch && jsonBlockMatch[1]) {
+      return JSON.parse(jsonBlockMatch[1]);
+    }
+
+    // 2. If no code block, try to find the first '{' and last '}'
+    const firstBrace = text.indexOf('{');
+    const lastBrace = text.lastIndexOf('}');
+
+    if (firstBrace !== -1 && lastBrace !== -1) {
+      const jsonCandidate = text.substring(firstBrace, lastBrace + 1);
+      return JSON.parse(jsonCandidate);
+    }
+
+    // 3. Fallback: try parsing the whole text
+    return JSON.parse(text);
+  } catch (e) {
+    console.error("Failed to parse JSON response. Raw text:", text);
+    // Return empty object instead of crashing, allows flow to continue with defaults
+    return {};
+  }
+};
+
+// Helper for Exponential Backoff Retry on 500/503 errors
+const generateWithRetry = async (ai: GoogleGenAI, params: any, retries = 3) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await ai.models.generateContent(params);
+    } catch (error: any) {
+      // If it's the last attempt, throw
+      if (i === retries - 1) throw error;
+
+      // Check for Internal Error (500) or Service Unavailable (503)
+      const status = error.status || error.response?.status || 0;
+      const code = error.code || 0;
+
+      if (status === 500 || status === 503 || code === 500) {
+        console.warn(`Gemini API Error 500/503. Retrying (${i + 1}/${retries})...`);
+        // Wait: 1s, 2s, 4s
+        await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, i)));
+        continue;
+      }
+
+      // If other error, throw immediately
+      throw error;
+    }
+  }
+  throw new Error("API failed after max retries");
+};
+
+// --- AGENT 1: ROUTE SPECIALIST ---
+// Görevi: Sadece Google Maps kullanarak kesin rota, süre ve mesafe verisi çıkarmak.
+const routeAgent = async (
+  ai: GoogleGenAI,
+  origin: string,
+  destination: string,
+  options?: RouteOptions
+) => {
+  const stopStr = options?.stopName
+    ? `VIA: ${options.stopName} ${options.stopCoords ? `(${options.stopCoords})` : ''}`
+    : "DIRECT ROUTE";
+
+  const tollStr = options?.useTolls
+    ? "USE TOLLS: YES"
+    : "AVOID TOLLS: YES";
+
+  // Explicitly structure the prompt to force a Directions query
+  const prompt = `
+    GÖREV: Tır/Kamyon için rota hesapla.
+    
+    NEREDEN: "${origin}"
+    NEREYE: "${destination}"
+    TERCİHLER: ${stopStr}, ${tollStr}
+
+    TALİMATLAR:
+    1. "Google Maps" aracını KULLANARAK "driving directions from ${origin} to ${destination}" sorgusunu çalıştır.
+    2. Tool çıktısındaki "distance" (mesafe) ve "duration" (süre) değerlerini KESİN OLARAK al. ASLA tahmin yapma veya kuş uçuşu mesafe kullanma.
+    3. Eğer tool çalışmazsa veya veri dönmezse, "Hesaplanamadı" döndür.
+    4. SÜRE HESABI: Google Maps "Otomobil" süresi verir. Tır için bu süreyi %30 artır.
+    5. ÇIKTI DİLİ: Sadece TÜRKÇE.
+
+    JSON FORMATI:
+    {
+      "totalDistance": "örn: 1200 km (Tool'dan gelen gerçek sürüş mesafesi)",
+      "estimatedDuration": "örn: 14 sa 30 dk (Tır Tahmini)",
+      "routeDescription": "Güzergahın geçtiği ana şehirler ve yolların Türkçe özeti.",
+      "estimatedArrivalHours": 14.5 (Sayısal saat değeri),
+      "isEstimate": false
+    }
+  `;
+
+  const response = await generateWithRetry(ai, {
+    model: "gemini-2.5-flash",
+    contents: prompt,
+    config: {
+      tools: [{ googleMaps: {} }],
+    }
+  });
+
+  console.log("FULL RESPONSE:", JSON.stringify(response, null, 2));
+  console.log("roite AGENT", parseJSONResponse(response.text))
+
+  return parseJSONResponse(response.text);
+};
+
+// --- AGENT 2: WEATHER SPECIALIST ---
+// Görevi: Başlangıç için şu anki, varış için hesaplanan varış saatindeki hava durumunu bulmak.
+const weatherAgent = async (
+  ai: GoogleGenAI,
+  origin: string,
+  destination: string,
+  arrivalInHours: number
+) => {
+  // Varış zamanını hesapla (Örn: Şu an 14:00 + 5.5 saat = 19:30)
+  const arrivalDate = new Date(Date.now() + arrivalInHours * 60 * 60 * 1000);
+  const arrivalTimeStr = arrivalDate.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+
+  const prompt = `
+    GÖREV: Hava durumu verisi al.
+    
+    KONUM 1 (Başlangıç): ${origin} (Şu an)
+    KONUM 2 (Varış): ${destination} (Tahmini Varış Saati: Bugün ${arrivalTimeStr} civarı)
+
+    TALİMATLAR:
+    1. "Google Search" aracını KULLAN.
+    2. ŞUNLARI ARA: "weather in ${origin} now" ve "weather in ${destination} at ${arrivalTimeStr}".
+    3. ÇIKTI DİLİ: Sadece TÜRKÇE (Örn: "Parçalı Bulutlu", "Yağmurlu", "Açık").
+
+    JSON FORMATI:
+    {
+      "origin": { "location": "${origin}", "temp": "örn: 15°C", "condition": "örn: Parçalı Bulutlu", "icon": "sunny" },
+      "destination": { "location": "${destination}", "temp": "örn: 12°C", "condition": "örn: Yağmurlu", "icon": "rainy" }
+    }
+    
+    Geçerli İkonlar: sunny, cloudy, rainy, storm, snow, fog.
+  `;
+
+  const response = await generateWithRetry(ai, {
+    model: "gemini-2.5-flash",
+    contents: prompt,
+    config: {
+      tools: [{ googleSearch: {} }],
+    }
+  });
+
+  return parseJSONResponse(response.text);
+};
+
+// --- AGENT 3: SAFETY & RISK SPECIALIST ---
+// Görevi: Karayolları (KGM) verilerine ve genel trafik risklerine odaklanmak.
+const riskAgent = async (
+  ai: GoogleGenAI,
+  routeDescription: string,
+  origin: string,
+  destination: string,
+  durationHours: number
+) => {
+  // YASAL MOLA HESABI (AETR & Karayolları Trafik Yönetmeliği)
+  // Kural: 4.5 saat sürüşten sonra 45 dk mola zorunludur.
+
+  const MAX_DRIVING_WITHOUT_BREAK = 4.5;
+  const MAX_DAILY_DRIVING = 9.0;
+
+  let breakInstruction = "";
+  let mandatoryBreakValue = "";
+
+  if (durationHours > MAX_DRIVING_WITHOUT_BREAK) {
+    breakInstruction = `
+      DİKKAT: Toplam tahmini sürüş süresi (${durationHours.toFixed(1)} saat), yasal sınır olan 4.5 saati geçmektedir.
+      KANUN: "Tırlar, her 4,5 saatlik sürüşten sonra en az 45 dakika mola vermek zorundadır."
+      GÖREV: Timeline (zaman çizelgesi) içine sürüşün yaklaşık 4.5. saatine denk gelen şehre/tesise ZORUNLU BİR "break" (mola) noktası ekle.
+      Mola başlığını "Yasal Zorunlu Mola (45 dk)" olarak ayarla.
+    `;
+    mandatoryBreakValue = "45 dk (Zorunlu)";
+  } else {
+    breakInstruction = `
+      Toplam süre (${durationHours.toFixed(1)} saat), 4.5 saatin altındadır.
+      KANUN: Kesintisiz sürüş süresi 4.5 saati aşmadığı için zorunlu mola gerekmez (İsteğe bağlıdır).
+      GÖREV: Timeline içine "break" (mola) tipi EKLEME. Varış noktasına direkt gidilebilir.
+    `;
+    mandatoryBreakValue = "Gerekmez";
+  }
+
+  // 9 Saati aşan ekstrem durumlar için ek uyarı
+  if (durationHours > MAX_DAILY_DRIVING) {
+    breakInstruction += `
+      UYARI: Sürüş süresi 9 saati aşıyor (Günlük Limit). Timeline sonuna doğru "Günlük Dinlenme (11 Saat)" uyarısı ekle.
+    `;
+  }
+
+  const prompt = `
+    GÖREV: Tır Sürücüleri İçin Türkçe Risk Analizi ve Mola Planlaması.
+    
+    ROTA: ${origin} -> ${destination}
+    DETAYLAR: ${routeDescription}
+    TOPLAM SÜRE: ${durationHours.toFixed(1)} Saat
+    
+    MOLA TALİMATI:
+    ${breakInstruction}
+
+    TALİMATLAR:
+    1. "Google Search" ile yol üzerindeki güncel riskleri, kaza kara noktalarını (KGM) ve hava durumu uyarılarını ara.
+    2. Analizi tamamen TÜRKÇE yap.
+    3. Timeline'ı adım adım oluştur (Başlangıç -> Yol Noktaları -> Varsa Mola -> Bitiş).
+    
+    JSON FORMATI:
+    {
+      "riskIntensity": [ { "name": "Bölge Adı", "value": 1-100, "color": "#hex" } ],
+      "riskTypes": [ { "category": "Tip Adı", "value": 1-10, "description": "Türkçe açıklama" } ],
+      "timeline": [ 
+        { "title": "Başlık", "description": "Türkçe detay", "type": "start/info/warning/danger/break/end", "icon": "traffic/wind/descent/toll" }
+      ],
+      "mandatoryBreak": "${mandatoryBreakValue}",
+      "breakNote": "Mola ile ilgili kanuni açıklama metni."
+    }
+  `;
+
+  const response = await generateWithRetry(ai, {
+    model: "gemini-2.5-flash",
+    contents: prompt,
+    config: {
+      tools: [{ googleSearch: {} }],
+    }
+  });
+
+  // Extract sources if any
+  const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+
+  return {
+    data: parseJSONResponse(response.text),
+    sources
+  };
+};
+
+// --- MAIN ORCHESTRATOR ---
+export const analyzeRoute = async (
+  originName: string,
+  destinationName: string,
+  originCoords?: string,
+  destCoords?: string,
+  options?: RouteOptions
+): Promise<RouteAnalysis> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+  // Use raw coordinates if available to ensure the Map Tool queries "Directions from 40.1,29.1 to ..."
+  // This is often more reliable than fuzzy text matching for names.
+  const originVal = originCoords || originName;
+  const destVal = destCoords || destinationName;
+
+  try {
+    // STEP 1: Route Agent (Critical Path)
+    console.log("Agent 1: Calculating Route...");
+    // We pass the Precise Values (Coords) for the tool, but Context for the description
+    const routeData = await routeAgent(ai, originVal, destVal, options);
+
+    // Fallback if route failed entirely
+    const safeRouteDesc = routeData.routeDescription || `${originName} - ${destinationName}`;
+    const safeArrivalHours = typeof routeData.estimatedArrivalHours === 'number' ? routeData.estimatedArrivalHours : 6; // Default to 6h if unknown
+
+    // STEP 2: Parallel Execution (Weather & Risks)
+    console.log("Agent 2 & 3: Fetching Weather and Risks...");
+
+    const [weatherData, riskResult] = await Promise.all([
+      weatherAgent(ai, originName, destinationName, safeArrivalHours),
+      // Pass the calculated hours to Risk Agent so it knows if a break is needed
+      riskAgent(ai, safeRouteDesc, originName, destinationName, safeArrivalHours)
+    ]);
+
+    const riskData = riskResult.data;
+
+
+    console.log("riskData", routeData)
+    // STEP 3: Merge & Return
+    const finalAnalysis: RouteAnalysis = {
+      summary: {
+        totalDistance: routeData.totalDistance || "Hesaplanıyor...",
+        estimatedDuration: routeData.estimatedDuration || "Hesaplanıyor...",
+        mandatoryBreak: riskData.mandatoryBreak || "Hesaplanıyor...",
+        breakNote: riskData.breakNote || "-"
+      },
+      weather: {
+        origin: weatherData.origin || { location: originName, temp: "-", condition: "-", icon: "cloudy" },
+        destination: weatherData.destination || { location: destinationName, temp: "-", condition: "-", icon: "cloudy" }
+      },
+      riskIntensity: riskData.riskIntensity || [],
+      riskTypes: riskData.riskTypes || [],
+      timeline: riskData.timeline || [],
+      groundingMetadata: riskResult.sources as any
+    };
+
+    return finalAnalysis;
+
+  } catch (error) {
+    console.error("Multi-Agent Analysis Error:", error);
+    throw error;
+  }
+};
