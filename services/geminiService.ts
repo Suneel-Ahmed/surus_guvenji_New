@@ -143,13 +143,19 @@ JSON olarak çıktı ver:
 export const analyzeRoute = async (
   originName: string,
   destinationName: string,
+  originCoords?: string,
+  destCoords?: string,
   options?: RouteOptions
 ): Promise<RouteAnalysis> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
+  // Use raw coordinates if available for better accuracy
+  const originVal = originCoords || originName;
+  const destVal = destCoords || destinationName;
+
   try {
     // STEP 1: Route Agent
-    const routeData = await routeAgent(ai, originName, destinationName, options);
+    const routeData = await routeAgent(ai, originVal, destVal, options);
     const safeRouteDesc = routeData.routeDescription || `${originName} - ${destinationName}`;
     const safeArrivalHours = typeof routeData.estimatedArrivalHours === "number" ? routeData.estimatedArrivalHours : 6;
 
