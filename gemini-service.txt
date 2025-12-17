@@ -107,8 +107,8 @@ const routeAgent = async (
     }
   });
 
-  console.log("FULL RESPONSE:", JSON.stringify(response, null, 2));
-  console.log("roite AGENT", parseJSONResponse(response.text))
+
+
 
   return parseJSONResponse(response.text);
 };
@@ -259,7 +259,7 @@ export const analyzeRoute = async (
 
   try {
     // STEP 1: Route Agent (Critical Path)
-    console.log("Agent 1: Calculating Route...");
+
     // We pass the Precise Values (Coords) for the tool, but Context for the description
     const routeData = await routeAgent(ai, originVal, destVal, options);
 
@@ -268,7 +268,7 @@ export const analyzeRoute = async (
     const safeArrivalHours = typeof routeData.estimatedArrivalHours === 'number' ? routeData.estimatedArrivalHours : 6; // Default to 6h if unknown
 
     // STEP 2: Parallel Execution (Weather & Risks)
-    console.log("Agent 2 & 3: Fetching Weather and Risks...");
+
 
     const [weatherData, riskResult] = await Promise.all([
       weatherAgent(ai, originName, destinationName, safeArrivalHours),
@@ -279,7 +279,7 @@ export const analyzeRoute = async (
     const riskData = riskResult.data;
 
 
-    console.log("riskData", routeData)
+
     // STEP 3: Merge & Return
     const finalAnalysis: RouteAnalysis = {
       summary: {

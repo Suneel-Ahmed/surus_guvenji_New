@@ -51,7 +51,7 @@ export default function PublicReportPage() {
         return;
       }
       const json = await res.json();
-      console.log("backend response", json)
+
       setReport(json.report);
     } catch (err) {
       console.error(err);
@@ -89,7 +89,7 @@ export default function PublicReportPage() {
     )}&destination=${encodeURIComponent(destLabel)}&travelmode=driving`
     : "";
 
-  console.log("report", report)
+
 
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-6 lg:px-8 lg:py-10">

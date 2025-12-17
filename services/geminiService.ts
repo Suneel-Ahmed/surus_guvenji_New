@@ -71,7 +71,7 @@ TALİMATLAR:
     contents: prompt
   });
 
-  console.log("response", response);
+
 
   return parseJSONResponse(response.text);
 };

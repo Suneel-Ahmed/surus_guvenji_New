@@ -24,7 +24,7 @@ const WeatherIcon = ({ icon, className }: { icon: string, className?: string }) 
 };
 
 export const SummaryCards: React.FC<SummaryCardsProps> = ({ data, weather }) => {
-  console.log("dataasdsad", data)
+
   return (
     <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
       {/* Origin Weather */}
